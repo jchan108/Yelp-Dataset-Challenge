@@ -1,0 +1,924 @@
+## **Yelp Challenge Final Project**
+
+**Introduction**
+
+We will be using data given to us by Yelp as part of their ninth round of the Yelp Dataset Challenge. It contains a lot of information about business descriptions and user reviews. The data provided to us includes five separate JSON files which were necessary to be extracted. The files were as follows with their own respective variables:
+**Business** - Business ID, Business name, neighborhood, address, city, state, postal code, latitude, longitude, star rating, review count, open/closed, attributes, categories, hours, type.
+**User** - User ID, name, account age,  review count, # of friends (social media interaction), review count, User's Elite status, review vote ratings, overall average star score of reviews, compliments received, type
+**Review** - Review ID, User ID, star rating, date, review text, review votes (useful, funny, cool), type.
+**Check in** -  Time, Business ID, type.
+**Tip** - Business ID, User ID, text, date, likes, type
+Our objectives after careful observation include: (1) focusing on a general analysis of eateries/restaurants , (2) text mining in order to find good and bad reviews, and (3) joining the reviews, tips, and business datasets to analyze the expertise/credibility of users. For the most part we want to focus on businesses that are located in America, our area of interest, which will be applied to the restaurant businesses and to the reviews text mining.
+
+
+
+
+SECTION ONE
+```{r}
+library(tidyverse)
+library(dplyr)
+library(plyr)
+library(data.table)
+
+help(memory.size)
+memory.size(max = FALSE)
+memory.size(max = TRUE)
+```
+
+```{r}
+setwd("C:/Users/jaech/Desktop/stuff/Stat167/YelpData")
+
+?fread
+YelpBusinessData <- fread("yelp_academic_dataset_business.csv")
+YelpCheckInData <- fread("yelp_academic_dataset_checkin.csv")
+YelpTipData <- fread("yelp_academic_dataset_tip.csv")
+YelpUserData <- fread("yelp_academic_dataset_user.csv")
+YelpReviewData <- fread("yelp_academic_dataset_review.csv", fill=TRUE, data.table=FALSE, na.strings = c("NA", "#NAME?"))
+
+YelpBusinessData
+YelpCheckInData
+YelpTipData
+YelpUserData
+YelpReviewData
+```
+
+```{r}
+# Yelp rounds up to the closest ?.5 or ?.0 average stars. "YelpAvg_stars" is the displayed value on the site for each business
+YelpBusinessID_stars <- select(YelpBusinessData, c(business_id, stars))
+setnames(YelpBusinessID_stars, "stars", "YelpAvg_stars")
+
+# Check if each "business_id" is unique
+anti_join(YelpBusinessID_stars, YelpReviewData, by = "business_id")
+
+
+# Join data by "business_id"
+YelpBusinessReviewJoint <- YelpBusinessID_stars %>%
+                  left_join(YelpReviewData, by = "business_id")
+#YelpBusinessReviewJoint <- arrange(YelpBusinessReviewJoint, user_id)
+YelpBusinessReviewJoint <- YelpBusinessReviewJoint %>% 
+  mutate(stardeviation = abs(YelpAvg_stars - stars))
+
+
+# detach("package:plyr", unload=TRUE)     <- detaches/unloads package
+# 'plyr' interfers with 'dplyr' when loading packages. If you run 'plyr' at the beginning, YelpReviewAccuracy will not run
+YelpReviewAccuracy <- YelpBusinessReviewJoint %>% 
+  group_by(user_id) %>% 
+  summarise(reviewcount = n(), ReviewAccuracy = mean(stardeviation)) 
+  #%>% arrange(desc(reviewcount))
+
+# Split dataset by Credibility Rating
+YelpUserExpert <- filter(YelpReviewAccuracy, ReviewAccuracy <= 0.75 ) %>%
+                  mutate(Credibility = "Expert", Credibility_Binary = 1)
+
+YelpUserFair075 <- filter(YelpReviewAccuracy, ReviewAccuracy > 0.75)
+YelpUserFair <- filter(YelpUserFair075, ReviewAccuracy <= 1.5) %>%
+                  mutate(Credibility = "Fair", Credibility_Binary = 0)
+
+YelpUserPoor <- filter(YelpReviewAccuracy, 1.5 < ReviewAccuracy) %>%
+                  mutate(Credibility = "Poor", Credibility_Binary = 0)
+
+YelpUserCredibility <- rbind(YelpUserExpert, YelpUserFair, YelpUserPoor) %>%
+                  arrange(desc(reviewcount))
+
+# remove unneeded dataframes to free up memory/space
+rm(YelpUserExpert)
+rm(YelpUserFair075)
+rm(YelpUserFair)
+rm(YelpUserPoor)
+rm(YelpBusinessID_stars)
+rm(YelpBusinessReviewJoint)
+rm(YelpReviewData)
+
+# Check if "user_id" is unique in YelpUserCredibility and YelpUserData
+anti_join(YelpUserCredibility, YelpUserData, by = "user_id")
+
+
+YelpUserEnhanced <- YelpUserCredibility %>%
+                  left_join(YelpUserData, by = "user_id") %>%
+                  arrange(desc(review_count))
+
+# plyr interfers with 'dplyr' when loading packages. If you run 'plyr' at the beginning, YelpReviewAccuracy will not run
+library(plyr)
+
+# Separate by year
+YelpUserEnhanced <- separate(YelpUserEnhanced, yelping_since, into = c("year", "month", "day"), sep="-") 
+
+# Rename ['None'] in 'elite' category to None so it is a shorter length of number of characters. ['None'] is 8 characters long, so None Elite users get marked as numElite_Years = 1
+YelpUserEnhanced <- transform(YelpUserEnhanced,
+          elite=revalue(elite,c("['None']"="None")))
+
+# Create column for number of years User has been Elite
+# Create column for number of friends User has. Each username is 22 characters long. Divide by 26
+# Test character length for user friends -> nchar("['Vx-l5rI0xAiN4SeBonrgkw', 'XmjYrNgzdbHQAiz2RF_8gw', 'Ge4TrEIFG91PoMCoc__FQg', 'MzrLhe2MAh6yvSd5fP38AQ']") / 26
+YelpUserEnhanced <- YelpUserEnhanced %>% mutate(numElite_Years = floor(nchar(elite) / 8),
+                                                num_Friends = floor(nchar(friends) / 26),
+                                                accountage_days = (2017 - as.numeric(year))*365 + (12 - as.numeric(month))*30 +                                                 as.numeric(day))
+
+detach("package:plyr", unload=TRUE)
+YelpUserTip <- YelpTipData %>% 
+  group_by(user_id) %>% 
+  summarise(tipcount = n())
+
+#anti_join(YelpUserEnhanced, YelpUserTip, by = "user_id")
+
+# Filterout users who do not have 'tipcount'
+YelpUserFiltered <- YelpUserEnhanced %>%
+                  left_join(YelpUserTip, by = "user_id") %>%
+                  filter(!is.na(tipcount))
+
+
+
+```
+
+
+
+```{r}
+# Modelling to see which factors contribute to the determination of Expert Users
+# YelpUserRandomSample <- YelpUserEnhanced[sample(1:nrow(YelpUserEnhanced), 250000, replace=FALSE),]
+
+# Full Model: as.factor(Credibility_Binary) ~ reviewcount + useful + compliment_photos + compliment_list + compliment_funny + compliment_plain + fans + compliment_note + funny + compliment_writer + compliment_cute + compliment_more + compliment_hot + cool + compliment_profile + compliment_cool + numElite_Years + num_Friends
+
+# Remove compliment factors that are not necessary in determining 'Expert' users. Compliment Cute Pic, Compliment Hot Stuff
+ExpertUser_lm <- glm(as.factor(Credibility_Binary) ~ reviewcount + useful + compliment_photos + compliment_list + compliment_funny + compliment_plain + fans + compliment_note + funny + compliment_writer + compliment_cute + compliment_more + compliment_hot + cool + compliment_profile + compliment_cool + numElite_Years + num_Friends + tipcount, data=YelpUserFiltered, family=binomial)
+
+anova1 <- anova(ExpertUser_lm, test="Chisq")
+anova1
+
+# Remove compliment hot, note, cool, and profile
+ExpertUser_lm2 <- glm(as.factor(Credibility_Binary) ~ reviewcount + useful + compliment_photos + compliment_list + compliment_funny + compliment_plain + fans + funny + compliment_writer + compliment_cute + compliment_more + cool + numElite_Years + num_Friends, data=YelpUserFiltered, family=binomial(link="logit"))
+
+anova2 <- anova(ExpertUser_lm2, test="Chisq")
+anova2
+
+# Model Comparison
+anova(ExpertUser_lm,ExpertUser_lm2, test="Chisq")
+```
+
+
+```{r}
+# Credibility among users
+ggplot(data = YelpUserEnhanced) + 
+  geom_boxplot(mapping = aes(x=Credibility, y=average_stars, fill=Credibility))
+
+```
+
+
+
+SECTION TWO
+
+
+
+---
+title: "stat167"
+output: html_document
+---
+```{r}
+#install.packages("tidyverse")
+#install.packages("data.table")
+#install.packages("tm")
+#install.packages("SnowballC")
+#install.packages("wordcloud")
+#install.packages("tidytext")
+#install.packages("text2vec")
+
+library(text2vec)
+library(scales)
+library(stringr)
+library(tidyr)
+library(tidytext)
+require(data.table)
+library(dplyr)
+library(tidyverse)
+#library(dp)
+library(tm)
+library(SnowballC)
+library(wordcloud)
+library(ggplot2)
+```
+
+```{r}
+setwd("C:/Users/joshc/OneDrive/Documents")
+YelpBusinessData = fread("yelp_academic_dataset_business.csv")
+#YelpCheckInData = fread("yelp_academic_dataset_checkin.csv")
+#YelpTipData = fread("yelp_academic_dataset_tip.csv")
+#YelpUserData = fread("yelp_academic_dataset_user.csv")
+#YelpReviewData = fread("yelp_academic_dataset_review.csv", fill = TRUE, data.table = FALSE, na.strings = c("NA","#Name?"))
+
+```
+
+```{r}
+set.seed(1336)
+#GOALS
+#1 - Show important words indicating good/bad/meh reviews
+#2 - create machine learning algorithm to assign scores to written reviews
+
+#YelpReviewData
+#YelpBusinessData
+
+#Trying to find US based restaraunts/food places
+YelpBusinessData$neighborhood = NULL #too many missing values, so get rid of neighborhood.
+
+YelpFoodData = YelpBusinessData[grep("Food|Restaraunts|Cafe|Bars",YelpBusinessData$categories),]
+YelpFoodData
+#Finding only US based restaraunt/food places.
+
+YelpFoodDataUS = filter(YelpFoodData, postal_code <= 99999,postal_code>=1)
+YelpFoodDataUS
+#rm(YelpFoodData) #clear this from memory because its huge
+
+#YelpFoodReviewDataUS = YelpReviewData[YelpReviewData$business_id %in% YelpFoodData$business_id, ] #only looking at review data for US restaraunts
+#mysample <- YelpFoodReviewDataUS[sample(1:nrow(YelpFoodReviewDataUS), 156000, replace=FALSE),]
+#rm(YelpReviewData) #clear this from memory because its huge
+#write.csv(mysample, file = "mysample.csv")
+setwd("C:/Users/joshc/Desktop")
+mysample = fread("mysample.csv")
+mysample = mutate(mysample, positive = stars>3)
+reviewsample = select(mysample,V1,text,stars,positive)
+
+mysample$text = gsub("\\\\n"," ",mysample$text)
+
+
+
+goodreviewtext = select(filter(mysample,stars>=4),c(text,stars)) #create text of good reviews
+#mehreviewtext = select(filter(mysample,stars==3),c(text,stars)) #create text of average reviews
+badreviewtext = select(filter(mysample,stars<=3),c(text,stars)) #create text of bad reviews
+
+
+
+```
+
+
+Generate wordcounts
+Ask Professor if i should tokenize into words
+When analyzing text data, it is very important to format it into tidy format
+One-token-Per Row format, but in this case I tokenized it by word. (you can do it by sentence too)
+
+```{r}
+#setwd("C:/Users/joshc/OneDrive/Documents/TextMining")
+#source <- DirSource(getwd()) #input path for documents
+
+#We create all the words in each vector.
+#but maybe we should make a dataframe of { Review key # | Score | word } 
+
+#mehreviews = mehreviewtext %>%
+ # unnest_tokens(word, text)
+
+badreviews = badreviewtext %>%
+  unnest_tokens(word, text)
+
+goodreviews = goodreviewtext %>%
+  unnest_tokens(word, text)
+
+```
+Now that the data is in one-word-per-row format, we can manipulate it with tidy tools like dplyr. Often in text analysis, we will want to remove stop words; stop words are words that are not useful for an analysis, typically extremely common words such as "the", "of", "to", and so forth in English. We can remove stop words (kept in the tidytext dataset stop_words) with an anti_join().
+
+```{r}
+data(stop_words)
+
+#mehreviews <- mehreviews %>%
+#  anti_join(stop_words)
+#mehreviews
+
+#meh = mehreviews %>%
+#  count(word, sort = TRUE) 
+
+
+goodreviews <- goodreviews %>%
+  anti_join(stop_words)
+goodreviews
+
+good = goodreviews %>%
+  count(word, sort = TRUE) 
+
+
+badreviews <- badreviews %>%
+  anti_join(stop_words)
+badreviews
+
+bad = badreviews %>%
+  count(word, sort = TRUE) 
+
+```
+
+
+From looking at the most common word counts I noticed a lot of duplicates. (food, service, time) so i feel like I should take them out.
+Ask Professor about advice for filtering out common words.
+I also need to remove the /n/ newline.
+
+```{r}
+frequency2 <- bind_rows(mutate(goodreviews, score = 'Good'), 
+                       mutate(badreviews, score = 'Bad')) %>% 
+  mutate(word = str_extract(word, "[a-z']+")) %>%
+  count(score, word) %>%
+  group_by(score) %>%
+  mutate(proportion = n / sum(n)) %>% 
+  select(-n) %>% 
+  spread(score, proportion) %>% 
+  gather(score, proportion, `Bad`)
+
+
+
+
+ggplot(frequency2, aes(x = proportion, y = `Good`, color = abs(`Good` - proportion))) +
+  geom_abline(color = "gray40", lty = 2) +
+  geom_jitter(alpha = 0.01, size = 2.5, width = 0.3, height = 0.3) +
+  geom_text(aes(label = word), check_overlap = TRUE, vjust = 1.5) +
+  scale_x_log10(labels = percent_format()) +
+  scale_y_log10(labels = percent_format()) +
+  scale_color_gradient(limits = c(0, 0.001), low = "darkslategray4", high = "gray75") +
+  facet_wrap(~score, ncol = 2) +
+  theme(legend.position="none") +
+  labs(y = "Good", x = NULL)
+
+```
+
+Ho: usage of word "example" is independent of bad/good review
+Ha: usage of word "example" is dependent on choice of bad/good review
+
+
+Left side is words more common in good reviews, right sid emore common in bad.
+This suggests that looking at individual words on the raw dataset provides some information, but there is a lot of noise as words seem to be repeated very often.
+
+Ask professor ma if there are more ways to filter through useless text.
+
+I should probably test between 1 star reviews and 5 star reviews.
+
+Create Wordcloud
+
+```{r}
+library(wordcloud)
+
+goodreviews %>%
+  #anti_join(stop_words) %>%
+  count(word) %>%
+  with(wordcloud(word, n, max.words = 100))
+
+badreviews %>%
+#  anti_join(stop_words) %>%
+  count(word) %>%
+  with(wordcloud(word, n, max.words = 100))
+
+#mehreviews %>%
+ # anti_join(stop_words) %>%
+ # count(word) %>%
+  #with(wordcloud(word, n, max.words = 100))
+
+```
+ 
+I was not happy with my wordcloud. There are too many generic words that end up in both reviews. Thus I want to try to remove some of the words.
+
+These wordclouds aren't that interesting, as a lot of words are repeating. Maybe I could filter out insignificant words. 
+Goal: Merge bad/good datasets into one dataset.
+
+Solution : Do some test to see a significant difference
+
+Word     Bad     Good    Meh    Total
+'apple'  23      34      54     111
+'banana' 34      23      23     340
+
+Repeat this test for each word.
+
+Ho : M1 = M2 
+Ha : at least one Mi is different from the others.
+
+```{r}
+mergedreview = merge(bad, good, by = "word", all = TRUE)
+#mergedreview = merge(mergedreview,meh,by = "word", all = TRUE)
+colnames(mergedreview) = c('word','bad','good')
+mergedreview[is.na(mergedreview)] <- 0
+
+
+```
+
+NEW STUFF
+
+
+Generate features using bag of words.
+
+```{r}
+library(text2vec)
+library(data.table)
+## 75% of the sample size
+smp_size <- floor(0.8 * nrow(reviewsample))
+set.seed(1337)
+train_ind <- sample(seq_len(nrow(reviewsample)), size = smp_size)
+test <- reviewsample[-train_ind, ]
+train <- reviewsample[train_ind, ]
+
+
+```
+
+
+```{r}
+tokens = train$text %>% 
+  prep_fun %>% 
+  tok_fun
+it_train = itoken(tokens, 
+                  ids = train$V1,
+                  progressbar = FALSE)
+
+vocab = create_vocabulary(it_train)
+vocab
+```
+
+
+
+```{r}
+vectorizer = vocab_vectorizer(vocab)
+dtm_train = create_dtm(it_train, vectorizer)
+```
+
+```{r}
+library(glmnet)
+NFOLDS = 4
+t1 = Sys.time()
+glmnet_classifier = cv.glmnet(x = dtm_train, y = train[['positive']], 
+                              family = 'binomial', 
+                              # L1 penalty
+                              alpha = 1,
+                              # interested in the area under ROC curve
+                              type.measure = "auc",
+                              nfolds = NFOLDS,
+                              thresh = 1e-3,
+                              maxit = 1e3)
+
+plot(glmnet_classifier)
+
+```
+```{r}
+it_test = test$text %>% 
+  prep_fun %>% 
+  tok_fun %>% 
+  itoken(ids = test$V1 , 
+         # turn off progressbar because it won't look nice in rmd
+         progressbar = FALSE)
+
+dtm_test = create_dtm(it_test, vectorizer)
+
+preds = predict(glmnet_classifier, dtm_test, type = 'response')[,1]
+glmnet:::auc(test$positive, preds)
+```NEW STUFF
+
+
+---
+title: "stat167"
+output: html_document
+---
+```{r}
+#install.packages("tidyverse")
+#install.packages("data.table")
+#install.packages("tm")
+#install.packages("SnowballC")
+#install.packages("wordcloud")
+#install.packages("tidytext")
+#install.packages("text2vec")
+
+library(text2vec)
+library(scales)
+library(stringr)
+library(tidyr)
+library(tidytext)
+require(data.table)
+library(dplyr)
+library(tidyverse)
+#library(dp)
+library(tm)
+library(SnowballC)
+library(wordcloud)
+library(ggplot2)
+```
+
+```{r}
+setwd("C:/Users/joshc/OneDrive/Documents")
+YelpBusinessData = fread("yelp_academic_dataset_business.csv")
+#YelpCheckInData = fread("yelp_academic_dataset_checkin.csv")
+#YelpTipData = fread("yelp_academic_dataset_tip.csv")
+#YelpUserData = fread("yelp_academic_dataset_user.csv")
+#YelpReviewData = fread("yelp_academic_dataset_review.csv", fill = TRUE, data.table = FALSE, na.strings = c("NA","#Name?"))
+
+```
+
+My goals for this section is to simply clean/extract the reviews dataset in order to present the data in a way that makes it easier for me to perform analysis and tests on later. I want to restrict the reviews I am looking at into just those that cover restaraunts located in the US, so we had to filter the data twice, once using filter to find only the postal codes valid in the US, and another time using grep to scan the categories column for tags related to food. I also had to sample the review data into 156,000 elements, as looking at all of the millions of the reviews would be too computationally expensive. The text in the reviews had to be cleaned, and I recieved helped from the professor to get rid of all of the newlines. I also seperated the reviews into two datasets, one of them for reviews more than 4, and the other for reviews less than 3, to stand for good and bad reviews respectively.
+
+```{r}
+set.seed(1336)
+
+#Trying to find US based restaraunts/food places
+YelpBusinessData$neighborhood = NULL #too many missing values, so get rid of neighborhood.
+
+YelpFoodData = YelpBusinessData[grep("Food|Restaraunts|Cafe|Bars",YelpBusinessData$categories),]
+YelpFoodData
+#Finding only US based restaraunt/food places.
+
+YelpFoodDataUS = filter(YelpFoodData, postal_code <= 99999,postal_code>=1)
+YelpFoodDataUS
+#rm(YelpFoodData) #clear this from memory because its huge
+
+#YelpFoodReviewDataUS = YelpReviewData[YelpReviewData$business_id %in% YelpFoodData$business_id, ] #only looking at review data for US restaraunts
+#mysample <- YelpFoodReviewDataUS[sample(1:nrow(YelpFoodReviewDataUS), 156000, replace=FALSE),]
+#rm(YelpReviewData) #clear this from memory because its huge
+#write.csv(mysample, file = "mysample.csv")
+setwd("C:/Users/joshc/Desktop")
+mysample = fread("mysample.csv")
+mysample = mutate(mysample, positive = stars>3)
+reviewsample = select(mysample,V1,text,stars,positive)
+
+mysample$text = gsub("\\\\n"," ",mysample$text)
+
+
+
+goodreviewtext = select(filter(mysample,stars>=4),c(text,stars)) #create text of good reviews
+#mehreviewtext = select(filter(mysample,stars==3),c(text,stars)) #create text of average reviews
+badreviewtext = select(filter(mysample,stars<=3),c(text,stars)) #create text of bad reviews
+
+```
+
+Generate wordcounts
+
+In the following chunks I wanted to convert my datasets into an easy to manage tidy format. That is, I want to turn it into a table with one token per row. The tokens I chose to do for this dataset is just one word, although I could have also used bigrams, which might have given more accurate results.
+
+The unnest_tokens function was applied to each row of the badreviewtext/goodreviewtext text section, and served to extract out each token (word seperated by a space) and score of the review it came from into a tidy data structure. 
+
+```{r}
+
+badreviews = badreviewtext %>%
+  unnest_tokens(word, text)
+
+goodreviews = goodreviewtext %>%
+  unnest_tokens(word, text)
+
+```
+
+Our data is now in a tidy format (one word per row), and we can apply dplyr to it now. Before we go any further, I want to remove all the stop words from the reviews. Stop words are words that hold very little meaning in interpreting the meaning behind sentences, like "the", "of", "to". We can remove them by performing an anti_join() with the words contained in the tidytext built in dataset stop_words.
+
+I also created two datasets, bad and good, that contained each token/word found in the badreviews/goodreviews respectively, and the count of how many times they appeared.
+
+```{r}
+data(stop_words)
+
+goodreviews <- goodreviews %>%
+  anti_join(stop_words)
+goodreviews
+
+good = goodreviews %>%
+  count(word, sort = TRUE) 
+
+
+badreviews <- badreviews %>%
+  anti_join(stop_words)
+badreviews
+
+bad = badreviews %>%
+  count(word, sort = TRUE) 
+
+```
+
+The following graph is a nice visualization of the words that are common in only good reviews and not the bad reviews, as well as the reverse. The left side of the chart represnts words more significantly found in good reviews, while the right side contains words more significantl found in the bad reviews. The closer the word is to the zero slope line, the more commonly they occured in both reviews.
+
+
+```{r}
+#library(ggplot2)
+#library(scales)
+frequency2 <- bind_rows(mutate(goodreviews, score = 'Good'), 
+                       mutate(badreviews, score = 'Bad')) %>% 
+  mutate(word = str_extract(word, "[a-z']+")) %>%
+  count(score, word) %>%
+  group_by(score) %>%
+  mutate(proportion = n / sum(n)) %>% 
+  select(-n) %>% 
+  spread(score, proportion) %>% 
+  gather(score, proportion, `Bad`)
+
+ggplot(frequency2, aes(x = proportion, y = `Good`, color = abs(`Good` - proportion))) +
+  geom_abline(color = "gray40", lty = 2) +
+  geom_jitter(alpha = 0.01, size = 2.5, width = 0.3, height = 0.3) +
+  geom_text(aes(label = word), check_overlap = TRUE, vjust = 1.5) +
+  scale_x_log10(labels = percent_format()) +
+  scale_y_log10(labels = percent_format()) +
+  scale_color_gradient(limits = c(0, 0.001), low = "darkslategray4", high = "gray75") +
+  facet_wrap(~score, ncol = 2) +
+  theme(legend.position="none") +
+  labs(y = "Good", x = NULL)
+
+cor.test(data = frequency2[frequency2$score == "Bad",],
+         ~ proportion + `Good`)
+
+
+```
+
+How correlated are teh word freuqencies between good/bad reviews? we obtained .9273174. This correlation is scarily high, as it implies that good and bad reviews have very similar distribution of word counts. I suppose it makes sense, as the spread of our ggplot was not very wide.
+
+
+
+```{r}
+library(wordcloud)
+library(dplyr)
+
+goodreviews %>%
+  #anti_join(stop_words) %>%
+  count(word) %>%
+  with(wordcloud(word, n, max.words = 100))
+
+badreviews %>%
+#  anti_join(stop_words) %>%
+  count(word) %>%
+  with(wordcloud(word, n, max.words = 100))
+
+#mehreviews %>%
+ # anti_join(stop_words) %>%
+ # count(word) %>%
+  #with(wordcloud(word, n, max.words = 100))
+
+```
+
+ 
+I was not happy with my wordcloud. There are too many generic words that end up in both reviews. Thus I want to try to remove some of the words.
+
+These wordclouds aren't that interesting, as a lot of words are repeating. Maybe I could filter out insignificant words. 
+Goal: Merge bad/good datasets into one dataset.
+
+Solution : Do some test to see a significant difference
+
+Word     Bad     Good    Meh    Total
+'apple'  23      34      54     111
+'banana' 34      23      23     340
+
+Repeat this test for each word.
+
+Ho : M1 = M2 
+Ha : at least one Mi is different from the others.
+
+Ho: usage of word "example" is independent of bad/good review
+Ha: usage of word "example" is dependent on choice of bad/good review
+
+
+Left side is words more common in good reviews, right sid emore common in bad.
+This suggests that looking at individual words on the raw dataset provides some information, but there is a lot of noise as words seem to be repeated very often.
+
+
+```{r}
+mergedreview = merge(bad, good, by = "word", all = TRUE)
+#mergedreview = merge(mergedreview,meh,by = "word", all = TRUE)
+colnames(mergedreview) = c('word','bad','good')
+mergedreview[is.na(mergedreview)] <- 0
+
+```
+
+I also want to create a machine learning algorithm, taking in text as input and outputting a predicted score.
+
+Generate features using bag of words.
+Split the data into training and testing.
+
+```{r}
+library(text2vec)
+library(data.table)
+## 75% of the sample size
+smp_size <- floor(0.8 * nrow(reviewsample))
+set.seed(1337)
+train_ind <- sample(seq_len(nrow(reviewsample)), size = smp_size)
+test <- reviewsample[-train_ind, ]
+train <- reviewsample[train_ind, ]
+
+
+```
+
+We define the preprocessing function to = tolower
+The tokenization function = word_tokenizer
+
+We iterate through our training set to create our list of tokens, which we use to create a vocabulary dataframe, a dataframe similar to the good/bad i created earlier that contains each token and the count of each token
+
+
+
+```{r}
+prep_fun = tolower
+tok_fun = word_tokenizer
+
+tokens = train$text %>% 
+  prep_fun %>% 
+  tok_fun
+it_train = itoken(tokens, 
+                  ids = train$V1,
+                  progressbar = FALSE)
+
+vocab = create_vocabulary(it_train)
+vocab
+
+```
+
+Create a document term matrix with the columns being the tokens that we generated. Each row of the matrix corresponds to each review, and each cell is marked as 1 if the word found in its column is found in the review, and 0 otherwise.   
+
+```{r}
+vectorizer = vocab_vectorizer(vocab)
+dtm_train = create_dtm(it_train, vectorizer)
+#dtm_train
+```
+
+In creating machine learning algorithms from a high-dimensional space, you need to be selective because a lot of them are not very good at handling high dimensions. Options are to either use SVM, project PCA to lower dimension, 
+
+Our approach to solving the problem of dimensionality is to apply a L1 penalty to our logistic regression model.
+
+We train a logistic regression model, our features being the existence of each token, and the labels being whether or not that review was >= 4 stars (TRUE), and <= 3 stars (FALSE)
+
+```{r}
+library(glmnet)
+NFOLDS = 4
+glmnet_classifier = cv.glmnet(x = dtm_train, y = train[['positive']], 
+                              family = 'binomial', 
+                              # L1 penalty
+                              alpha = 1,
+                              # interested in the area under ROC curve
+                              type.measure = "auc",
+                              nfolds = NFOLDS,
+                              thresh = 1e-3,
+                              maxit = 1e3)
+
+plot(glmnet_classifier)
+
+print(paste("max AUC =", round(max(glmnet_classifier$cvm), 4)))
+
+```
+```{r}
+it_test = test$text %>% 
+  prep_fun %>% 
+  tok_fun %>% 
+  itoken(ids = test$V1 , 
+         # turn off progressbar because it won't look nice in rmd
+         progressbar = FALSE)
+
+dtm_test = create_dtm(it_test, vectorizer)
+
+preds = predict(glmnet_classifier, dtm_test, type = 'response')[,1]
+glmnet:::auc(test$positive, preds)
+```
+
+
+A model has been fit to our document term matrix. 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Section 3:
+```{r}
+#install.packages("tm")
+#install.packages("SnowballC")
+#install.packages("wordcloud")
+#install.packages("tidytext")
+#library(dp)
+#install.packages("slam")
+require(tm)
+library(SnowballC)
+require(wordcloud)
+library(ggplot2)
+library(tm)
+library(tidytext)
+setwd("C:/Users/Admin/Desktop/Stat 167 Project")
+YelpBusinessData = fread("yelp_academic_dataset_business.csv")
+YelpBusinessAmerica <- YelpBusinessData %>% filter(state == "AL" | state == "AK" | state == "AZ" | state == "AR" | state == "CA" | state == "CO" | state == "CT" | state == "DE" | state == "FL" | state == "GA" | state == "HI" | state == "ID" | state == "IL" | state == "IN" | state == "IA" | state == "KS" | state == "KY" | state == "LA" | state == "ME" | state == "MD" | state == "MA" | state == "MI" | state == "MN" | state == "MS" | state == "MO" | state == "MT" | state == "NE" | state == "NV" | state == "NH" | state == "NJ" | state == "NM" | state == "NY" | state == "NC" | state == "ND" | state == "OH" | state == "OK" | state == "OR" | state == "PA" | state == "RI" | state == "SC" | state == "SD" | state == "TN" | state == "TX" | state == "UT" | state == "VT" | state == "VA" | state == "WA" | state == "WV" | state == "WI" | state == "WY")
+YelpBusinessStateCount <- YelpBusinessAmerica %>% group_by(state) %>% summarise(count=n())
+
+arrange(YelpBusinessAmerica, desc(longitude))
+# map of restaurant business locations
+statesmap <- map_data("state")
+dim(statesmap)
+str(statesmap)
+#ggplot(data = statesmap) + 
+#  geom_polygon(aes(x=long, y = lat, group = group), fill = "white", color = "black") + 
+#  coord_quickmap()
+restaurantbusinessmap <- ggplot(data = statesmap) +
+  geom_polygon(data=statesmap, aes(x=long, y=lat, group = group),color="black", fill="white" ) +
+  geom_point(data=YelpBusinessAmerica, aes(x=longitude, y=latitude), color="blue")
+restaurantbusinessmap
+
+
+# top 5 states AZ, NC, NV, OH, PA (most # of restaurants)
+top5states <- YelpBusinessData %>% filter(state == "AZ" | state == "NC" | state == "NV" | state == "OH" | state == "PA")
+top5statescount <- top5states %>% count(state)
+anova1 <- aov(stars ~ as.factor(state), data = top5states)
+summary(anova1)
+TukeyHSD(anova1)
+ggplot(top5states) +
+  geom_bar(mapping = aes(x=state, fill=state)
+
+
+# Filter to Restaurants only
+library(stringr)
+BusAmericaRestaurants <- YelpBusinessData %>% filter(str_detect(categories, "Restaurants"))
+
+
+
+
+# A lot of attributes, so we test to understand just one element
+RestaurantsAttributes <- BusAmericaRestaurants %>% filter(str_detect(attributes, "Alcohol"))
+# There are 38037 restaurants that state they are with or without alcohol
+# Some restaurants do not state whether they serve alcohol or not
+AlcoholicRestaurants <- RestaurantsAttributes %>% filter(str_detect(attributes, "Alcohol: none"))
+# 17,112 do not provide alcohol
+NonAlcoholicRestaurants <- RestaurantsAttributes %>% filter(str_detect(attributes, paste(c("Alcohol: full_bar", "Alcohol: beer_and_wine"),collapse = '|')))
+# 20,925 serve alcohol
+plot.alcoholbarplot <- ggplot(NULL) +
+  geom_bar(data=AlcoholicRestaurants, aes(x=stars), fill="coral1") +
+  geom_bar(data=NonAlcoholicRestaurants, aes(x=stars), fill="darkslategray3")
+plot.alcoholbarplot
+?geom_bar
+
+library(gridExtra)
+plot.alcohol <- ggplot(AlcoholicRestaurants) +
+  geom_boxplot(aes(x="", y=stars), fill="coral1") +
+  coord_flip()
+plot.nonalcohol <- ggplot(NonAlcoholicRestaurants) +  
+  geom_boxplot(aes(x="", y=stars), fill="darkslategray3") +
+  coord_flip()
+grid.arrange(plot.alcohol, plot.nonalcohol, nrow = 2)
+
+
+
+
+library(tidytext)
+tidyRestaurants <- BusAmericaRestaurants %>%
+  unnest_tokens(category, categories)
+# most frequent restaurants
+desc.category <- tidyRestaurants %>% count(category, sort = TRUE)
+ethnictop5 <- tidyRestaurants %>% filter(category == "american" | category == "italian" | category == "mexican" | category == "chinese" | category == "japanese")
+# categories that appear at least n > 100
+ethniclow5 <- tidyRestaurants %>% filter(category == "african" | category == "persian" | category == "iranian" | category == "lebanese" | category == "taiwanese")
+
+t.test(ethnictop5$stars,ethniclow5$stars, alternative="two.sided")
+# There is a difference of means
+library(gridExtra)
+plot.ethnictop5 <- ggplot(ethnictop5) +
+  geom_boxplot(aes(x="", y=stars), fill="lightblue") +
+  coord_flip()
+plot.ethniclow5 <- ggplot(ethniclow5) +  
+  geom_boxplot(aes(x="", y=stars), fill="darksalmon") +
+  coord_flip()
+grid.arrange(plot.ethnictop5, plot.ethniclow5, nrow = 2)
+
+anovatop5 <- aov(stars ~ as.factor(category), data = ethnictop5)
+summary(anovatop5)
+# low pvalue = categories have different means from eachother. high p value = categories do not have a large difference of mean stars from eachother
+TukeyHSD(anovatop5)
+
+anovalow5 <- aov(stars ~ as.factor(category), data = ethniclow5)
+summary(anovalow5)
+TukeyHSD(anovalow5)
+
+```
+
+
+
+
+
+
+Analysis:
+We first filtered out our dataset in the "business" file to only include the American businesses. At first we attempted to filter out the data by only selecting businesses that had zip codes that were within the range of American zip codes. However, we ran into some issues filtering out all the non-American businesses because other countries such as England had some similar zip codes. We then manually wrote the code to filter out the data by only selecting those with American state names. After doing that, we made a summary table to see which states were included in our data. There were only ten states that were included in our data set.
+
+We then took the top five states, which were Arizona, North Carolina, Nevada, Ohio, and Pennsylvania, and filtered out our dataset of American businesses to only include those that were in these top 5 states. We then wanted to test whether or not the mean average stars ratings were different among businesses inside these states. We performed the ANOVA test and got a p-value that was less than alpha = 0.05 which tells us that at least one of the states had a significantly different mean average star rating than the others. We performed the Tukey HSD test to test for multiple comparisons of means and found that all the combinations of states except those of Nevada and Arizona and Ohio and Pennslyvania were significantly different from each other.
+
+As we can see from the boxplots above, there appears to be a lower median of average rating stars for the top 5 ethnic restaurants than the median of average rating stars for the bottom 5 ethnic restaurants (only including the ones with at least 100 reviews). We believe that this may be the case because a restaurant with higher ratings may have more competition and as a result there can be a greater variability in the scores that a user may give to that restaurant. We also performed a two sample t-test to compare the means of the top 5 ethnic restaurants and the bottom five ethnic restaurants. We got a p-value less than alpha = 0.05 and concluded that the mean average star ratings were significantly different from the two groups. 
+
+
+We wanted to test if there was a difference in means of average star ratings for each of the top five ethnic groups. We performed the ANOVA test to test whether or not the population means were equal to each other. The p-value we observed, <2e-16,  was less than alpha = 0.05 so we concluded that at least one of the population means were different from each other. We then went on to perform a post hoc test, the Tukey HSD test. We then found out the to determine which one of these pairs were different from each other. We saw that only the Mexican-American and Japanese-Italian combinations had mean average star ratings that were not different from each other at 0.05 significance level.
+
+We then went on to perform another ANOVA test in the bottom five ethnic restaurants. Similarly we got a p-value less than alpha = 0.05 and concluded at least one of the population means were signiicantly different from each other. We performed the Tukey HSD test once again and observed that only the combination of Taiwanese and African restaurants had mean average star ratings that were different from each other at 0.05 significance level.
+
